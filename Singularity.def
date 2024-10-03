@@ -20,9 +20,9 @@ From: ubuntu:latest
     export PATH=$PATH:/opt/julia/julia-1.10.5/bin
     mkdir -p /opt/juliadepot
     export JULIA_DEPOT_PATH=/opt/juliadepot
-    cd /opt && git clone https://github.com/timweiland/DiffEqGMRFs.jl
-    julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.update(); Pkg.build(); Pkg.instantiate()'
-    julia --project=/opt/DiffEqGMRFs.jl -e 'using DiffEqGMRFs'
+    # cd /opt && git clone https://github.com/timweiland/DiffEqGMRFs.jl
+    # julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.update(); Pkg.build(); Pkg.instantiate()'
+    # julia --project=/opt/DiffEqGMRFs.jl -e 'using DiffEqGMRFs'
 
     ## Interactive Julia will write to logs, but we don't want
     ## the container to be writable, so link it to tmpfs on host.
@@ -38,6 +38,9 @@ From: ubuntu:latest
     export JULIA_PROJECT=/opt/DiffEqGMRFs.jl
 
 %runscript
+    julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.update(); Pkg.build(); Pkg.instantiate()'
+    julia --project=/opt/DiffEqGMRFs.jl -e 'using DiffEqGMRFs'
+
     echo "Container was created $NOW"
     echo "Arguments received: $*"
     echo pwd
