@@ -1,7 +1,7 @@
 export rmse, max_err, rel_err
 
 function rmse(pred, soln)
-    return sqrt(mean((pred .- soln).^2))
+    return sqrt(mean((pred .- soln) .^ 2))
 end
 
 function max_err(pred, soln)

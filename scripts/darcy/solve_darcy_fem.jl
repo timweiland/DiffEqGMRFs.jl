@@ -1,42 +1,54 @@
-using MAT, DiffEqGMRFs, GMRFs, Ferrite, HDF5, GLMakie, SparseArrays, LinearAlgebra, LinearMaps, Printf, TimerOutputs, Random
-using Distributions
+using DrWatson
+@quickactivate "DiffEqGMRFs"
+
+using Distributions,
+    DiffEqGMRFs,
+    GMRFs,
+    Ferrite,
+    HDF5,
+    GLMakie,
+    SparseArrays,
+    LinearAlgebra,
+    LinearMaps,
+    Printf,
+    TimerOutputs,
+    Random,
+    ArgParse
 import Base: show
 
-const to = TimerOutput()
-
-struct DarcyDataset
-    darcy_vars::Dict{String}
-    x_coords::AbstractVector{Float64}
-    y_coords::AbstractVector{Float64}
-
-    function DarcyDataset(path)
-        darcy_vars = matread(path)
-        x_coords = range(0., 1., Base.size(darcy_vars["sol"], 2))
-        y_coords = range(0., 1., Base.size(darcy_vars["sol"], 3))
-        return new(darcy_vars, x_coords, y_coords)
+###### Argparse ######
+function parse_cmd()
+    s = ArgParseSettings()
+    @add_arg_table! s begin
+        "--datasetname"
+        help = "Name of the Darcy flow dataset to use"
+        arg_type = String
+        default = "piececonst_r241_N1024_smooth1"
+        "--N_xy"
+        help = "Number of FEM elements in each direction"
+        arg_type = Int
+        default = 300
     end
+    return parse_args(s)
 end
+parsed_args = parse_cmd()
 
-function show(io::IO, ds::DarcyDataset)
-    println(io, "DarcyDataset with $(Base.size(ds.darcy_vars["sol"], 1)) samples of size $(Base.size(ds.darcy_vars["sol"], 2))x$(Base.size(ds.darcy_vars["sol"], 3))")
-end
+###### Params ######
+datasetname = parsed_args["datasetname"]
+N_xy = parsed_args["N_xy"]
+beta = 1.0
+params = @strdict N_xy datasetname beta
 
-function get_problem(ds::DarcyDataset, idx)
-    return ds.darcy_vars["sol"][idx, :, :], ds.darcy_vars["coeff"][idx, :, :]
-end
+println(params)
 
-function get_xy_idcs(point, x_coords, y_coords)
-    x_idx = argmin(abs.(x_coords .- point[1]))
-    y_idx = argmin(abs.(y_coords .- point[2]))
-    return x_idx, y_idx
-end
+const to = TimerOutput()
 
 function assemble_darcy_diff_matrix(
     disc::FEMDiscretization,
     x_coords::AbstractVector,
     y_coords::AbstractVector,
     coeff_mat::AbstractMatrix;
-    inflated_boundary=false
+    inflated_boundary = false,
 )
     dh = disc.dof_handler
 
@@ -53,8 +65,8 @@ function assemble_darcy_diff_matrix(
     keep_dofs = inflated_boundary ? [] : nothing
     for cell in CellIterator(dh)
         reinit!(cellvalues, cell)
-        Ge .= 0.
-        fe .= 0.
+        Ge .= 0.0
+        fe .= 0.0
         cell_coords = getcoordinates(cell)
         keep = true
         # Loop over quadrature points
@@ -69,7 +81,7 @@ function assemble_darcy_diff_matrix(
             dΩ = getdetJdV(cellvalues, q_point)
             # Loop over test shape functions
             for i = 1:n_basefuncs
-                δu  = shape_value(cellvalues, q_point, i)
+                δu = shape_value(cellvalues, q_point, i)
                 ∇δu = shape_gradient(cellvalues, q_point, i)
                 fe[i] += beta * δu * dΩ
                 # Loop over trial shape functions
@@ -91,22 +103,24 @@ function assemble_darcy_diff_matrix(
 end
 
 ###### Read data ######
-path = "./data/Darcy_241/piececonst_r241_N1024_smooth1.mat"
+datasetname = "piececonst_r241_N1024_smooth1"
+path = datadir("input_data", "Darcy_241", "$datasetname.mat")
 ds = DarcyDataset(path)
-beta = 1.0
 example_soln, example_coeff = get_problem(ds, 2)
 x_coords, y_coords = ds.x_coords, ds.y_coords
 
-boundary_width = 0.0
-inflated_boundary = boundary_width > 0.0
-
-function form_discretization(N_xy; boundary_width=0.0, use_dirichlet_bc=true)
+function form_discretization(N_xy; boundary_width = 0.0, use_dirichlet_bc = true)
     x0 = y0 = 0.0 - boundary_width
     x1 = y1 = 1.0 + boundary_width
-    grid = generate_grid(QuadraticTriangle, (N_xy, N_xy), Tensors.Vec(x0, y0), Tensors.Vec(x1, y1))
+    grid = generate_grid(
+        QuadraticTriangle,
+        (N_xy, N_xy),
+        Tensors.Vec(x0, y0),
+        Tensors.Vec(x1, y1),
+    )
     ip = Lagrange{2,RefTetrahedron,2}()
     qr = QuadratureRule{2,RefTetrahedron}(3)
-    
+
     bcs = []
     if use_dirichlet_bc
         ∂Ω = union(
@@ -122,8 +136,8 @@ function form_discretization(N_xy; boundary_width=0.0, use_dirichlet_bc=true)
 end
 
 ###### Form discretization ######
-form_discretization(300) # Trigger precompilation
-@timeit to "Mesh generation" disc = form_discretization(300)
+form_discretization(N_xy) # Trigger precompilation
+@timeit to "Mesh generation" disc = form_discretization(N_xy)
 
 @timeit to "Etc" begin
     pred_coords = [Tensors.Vec(Float64(x), Float64(y)) for x in x_coords for y in y_coords]
@@ -139,7 +153,13 @@ function solve_problem(idx)
     cur_to = TimerOutput()
     example_soln, example_coeff = get_problem(ds, idx)
 
-    @timeit cur_to "PDE Discretization" K, f, _ = assemble_darcy_diff_matrix(disc, x_coords, y_coords, example_coeff; inflated_boundary=false)
+    @timeit cur_to "PDE Discretization" K, f, _ = assemble_darcy_diff_matrix(
+        disc,
+        x_coords,
+        y_coords,
+        example_coeff;
+        inflated_boundary = false,
+    )
     @timeit cur_to "Linear solve" (u = K \ f; apply!(u, disc.constraint_handler))
     pred = to_mat(u, E, x_coords, y_coords)
     cur_rel_err = rel_err(pred, example_soln)
@@ -154,29 +174,20 @@ max_errs = Float64[]
 solve_times = Int64[]
 pde_disc_times = Int64[]
 
-for i in 1:10
-    cur_rel_err, cur_rmse, cur_max_err, std_norm, cur_to = solve_problem(i)
-    println("Relative error (%) = $(cur_rel_err * 100)")
-    println("RMSE: $(@sprintf("%.2e", cur_rmse)), Max error: $(@sprintf("%.2e", cur_max_err))")
-    println("Std norm: $(@sprintf("%.2e", std_norm))")
+N_samples = Base.size(ds.darcy_vars["sol"], 1)
+for i = 1:N_samples
+    cur_rel_err, cur_rmse, cur_max_err, cur_to = solve_problem(i)
     push!(rel_errs, cur_rel_err)
     push!(rmses, cur_rmse)
     push!(max_errs, cur_max_err)
-    push!(std_norms, std_norm)
-    push!(conditioning_times, TimerOutputs.time(cur_to["Conditioning"]))
-    push!(std_dev_times, TimerOutputs.time(cur_to["Std dev"]))
-    push!(sampling_times, TimerOutputs.time(cur_to["Sampling"]))
     push!(pde_disc_times, TimerOutputs.time(cur_to["PDE Discretization"]))
-    print_timer(cur_to)
+    push!(solve_times, TimerOutputs.time(cur_to["Linear solve"]))
+    if i % 10 == 0
+        println("Finished $i / $N_samples ($((i / N_samples) * 100)%)")
+    end
 end
 
-out_dict = Dict(
-    "Relative error" => rel_errs,
-    "RMSE" => rmses,
-    "Max error" => max_errs,
-    "Std norm" => std_norms,
-    "Conditioning times" => conditioning_times,
-    "Std dev times" => std_dev_times,
-    "Sampling times" => sampling_times,
-    "PDE discretization times" => pde_disc_times
-)
+out_dict = @strdict rel_errs rmses max_errs solve_times pde_disc_times
+out_dict = merge(out_dict, params)
+
+@tagsave(datadir("sims", "darcy", "fem", savename(params, "jld2")), out_dict)

@@ -158,19 +158,19 @@ function discretize(
         𝒟.H,
         𝒟.k,
         𝒟.f,
-        𝒟.g
+        𝒟.g,
     )
-    
+
     M̃ = M
     f = spzeros(size(K, 1))
     apply!(M̃, f, spatial_disc.constraint_handler)
     M̃⁻¹ = spdiagm(0 => 1 ./ diag(M̃))
-    
+
     K_matern = (κ_matern^2 * M̃ + G)
     apply!(K_matern, f, spatial_disc.constraint_handler)
 
     ν = 2
-    σ²_natural = gamma(ν) / (gamma(ν + 1) * (4π) * κ_matern^(2*ν))
+    σ²_natural = gamma(ν) / (gamma(ν + 1) * (4π) * κ_matern^(2 * ν))
     σ²_goal = 1.0
     ratio = σ²_natural / σ²_goal
 
@@ -180,13 +180,27 @@ function discretize(
     end
 
     x₀ = GMRF(spzeros(size(Q_matern, 1)), Symmetric(Q_matern))
-    
+
     β = dt -> sqrt(dt) * 𝒟.τ
     β⁻¹ = dt -> 1.0 / β(dt)
-    G_fn = dt -> (S_tmp = M̃ + dt * K; apply!(S_tmp, f, spatial_disc.constraint_handler); LinearMap(S_tmp))
-    
-    ssm = ImplicitEulerSSM(x₀, G_fn, dt -> LinearMap(M̃), dt -> LinearMap(M̃⁻¹), β, β⁻¹, x₀, ts)
-    
+    G_fn =
+        dt -> (
+            S_tmp = M̃ + dt * K; apply!(S_tmp, f, spatial_disc.constraint_handler); LinearMap(
+                S_tmp,
+            )
+        )
+
+    ssm = ImplicitEulerSSM(
+        x₀,
+        G_fn,
+        dt -> LinearMap(M̃),
+        dt -> LinearMap(M̃⁻¹),
+        β,
+        β⁻¹,
+        x₀,
+        ts,
+    )
+
     X = joint_ssm(ssm)
     return ConstantMeshSTGMRF(X.mean, X.precision, spatial_disc, ssm, CGSolverBlueprint())
 end

@@ -68,7 +68,7 @@ function tridiagonal_cholesky(A::SparseMatrixCSC, N_blocks)
     Cs = AbstractArray{eltype(A)}[]
 
     for i = 2:N_blocks
-        cur_row_start = (i-1) * block_size + 1
+        cur_row_start = (i - 1) * block_size + 1
         cur_row_stop = i * block_size
         B = Array(A[cur_row_start:cur_row_stop, (i-2)*block_size+1:(i-1)*block_size])
         C = forward_solve(chos[end], B')'

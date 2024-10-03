@@ -1,4 +1,15 @@
-using MAT, DiffEqGMRFs, GMRFs, Ferrite, HDF5, GLMakie, SparseArrays, LinearAlgebra, LinearMaps, Printf, TimerOutputs, Random
+using MAT,
+    DiffEqGMRFs,
+    GMRFs,
+    Ferrite,
+    HDF5,
+    GLMakie,
+    SparseArrays,
+    LinearAlgebra,
+    LinearMaps,
+    Printf,
+    TimerOutputs,
+    Random
 using Distributions
 import Base: show
 
@@ -11,14 +22,17 @@ struct DarcyDataset
 
     function DarcyDataset(path)
         darcy_vars = matread(path)
-        x_coords = range(0., 1., Base.size(darcy_vars["sol"], 2))
-        y_coords = range(0., 1., Base.size(darcy_vars["sol"], 3))
+        x_coords = range(0.0, 1.0, Base.size(darcy_vars["sol"], 2))
+        y_coords = range(0.0, 1.0, Base.size(darcy_vars["sol"], 3))
         return new(darcy_vars, x_coords, y_coords)
     end
 end
 
 function show(io::IO, ds::DarcyDataset)
-    println(io, "DarcyDataset with $(Base.size(ds.darcy_vars["sol"], 1)) samples of size $(Base.size(ds.darcy_vars["sol"], 2))x$(Base.size(ds.darcy_vars["sol"], 3))")
+    println(
+        io,
+        "DarcyDataset with $(Base.size(ds.darcy_vars["sol"], 1)) samples of size $(Base.size(ds.darcy_vars["sol"], 2))x$(Base.size(ds.darcy_vars["sol"], 3))",
+    )
 end
 
 function get_problem(ds::DarcyDataset, idx)
@@ -36,7 +50,7 @@ function assemble_darcy_diff_matrix(
     x_coords::AbstractVector,
     y_coords::AbstractVector,
     coeff_mat::AbstractMatrix;
-    inflated_boundary=false
+    inflated_boundary = false,
 )
     dh = disc.dof_handler
 
@@ -53,8 +67,8 @@ function assemble_darcy_diff_matrix(
     keep_dofs = inflated_boundary ? [] : nothing
     for cell in CellIterator(dh)
         reinit!(cellvalues, cell)
-        Ge .= 0.
-        fe .= 0.
+        Ge .= 0.0
+        fe .= 0.0
         cell_coords = getcoordinates(cell)
         keep = true
         # Loop over quadrature points
@@ -69,7 +83,7 @@ function assemble_darcy_diff_matrix(
             dΩ = getdetJdV(cellvalues, q_point)
             # Loop over test shape functions
             for i = 1:n_basefuncs
-                δu  = shape_value(cellvalues, q_point, i)
+                δu = shape_value(cellvalues, q_point, i)
                 ∇δu = shape_gradient(cellvalues, q_point, i)
                 fe[i] += beta * δu * dΩ
                 # Loop over trial shape functions
@@ -100,13 +114,18 @@ x_coords, y_coords = ds.x_coords, ds.y_coords
 boundary_width = 0.0
 inflated_boundary = boundary_width > 0.0
 
-function form_discretization(N_xy; boundary_width=0.0, use_dirichlet_bc=true)
+function form_discretization(N_xy; boundary_width = 0.0, use_dirichlet_bc = true)
     x0 = y0 = 0.0 - boundary_width
     x1 = y1 = 1.0 + boundary_width
-    grid = generate_grid(QuadraticTriangle, (N_xy, N_xy), Tensors.Vec(x0, y0), Tensors.Vec(x1, y1))
+    grid = generate_grid(
+        QuadraticTriangle,
+        (N_xy, N_xy),
+        Tensors.Vec(x0, y0),
+        Tensors.Vec(x1, y1),
+    )
     ip = Lagrange{2,RefTetrahedron,2}()
     qr = QuadratureRule{2,RefTetrahedron}(3)
-    
+
     bcs = []
     if use_dirichlet_bc
         ∂Ω = union(
@@ -136,7 +155,7 @@ function to_mat(dof_vals, E, x_coords, y_coords)
 end
 
 ###### Prior ######
-function form_prior(disc::FEMDiscretization, ν_matern=2, range=0.05, σ²=1.0)
+function form_prior(disc::FEMDiscretization, ν_matern = 2, range = 0.05, σ² = 1.0)
     ν_matern = 2
     desired_range = 0.05
     κ = √(8ν_matern) / desired_range
@@ -151,8 +170,22 @@ form_prior(disc) # Trigger precompilation
 @timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50))
 
 ##### DARCY OBSERVATIONS ######
-function form_observations(disc::FEMDiscretization, x_coords, y_coords, example_coeff; inflated_boundary=false, A_boundary=nothing, ys_boundary=nothing)
-    D, ys_D, keep_dofs = assemble_darcy_diff_matrix(disc, x_coords, y_coords, example_coeff; inflated_boundary=inflated_boundary)
+function form_observations(
+    disc::FEMDiscretization,
+    x_coords,
+    y_coords,
+    example_coeff;
+    inflated_boundary = false,
+    A_boundary = nothing,
+    ys_boundary = nothing,
+)
+    D, ys_D, keep_dofs = assemble_darcy_diff_matrix(
+        disc,
+        x_coords,
+        y_coords,
+        example_coeff;
+        inflated_boundary = inflated_boundary,
+    )
     if keep_dofs !== nothing
         D = D[keep_dofs, 1:end]
         ys_D = ys_D[keep_dofs]
@@ -169,19 +202,30 @@ end
 A_boundary = ys_boundary = nothing
 if inflated_boundary
     boundary_step = 0.003
-    boundary_obs = [[Tensors.Vec(x, 0.0) for x in 0:boundary_step:1.0];
-                    [Tensors.Vec(x, 1.0) for x in 0:boundary_step:1.0];
-                    [Tensors.Vec(0.0, y) for y in 0:boundary_step:1.0];
-                    [Tensors.Vec(1.0, y) for y in 0:boundary_step:1.0]]
+    boundary_obs = [
+        [Tensors.Vec(x, 0.0) for x = 0:boundary_step:1.0]
+        [Tensors.Vec(x, 1.0) for x = 0:boundary_step:1.0]
+        [Tensors.Vec(0.0, y) for y = 0:boundary_step:1.0]
+        [Tensors.Vec(1.0, y) for y = 0:boundary_step:1.0]
+    ]
     A_boundary = evaluation_matrix(disc, boundary_obs)
     ys_boundary = zeros(size(A_boundary, 1))
 end
 
-A, ys = form_observations(disc, x_coords, y_coords, example_coeff; inflated_boundary=inflated_boundary, A_boundary=A_boundary, ys_boundary=ys_boundary)
+A, ys = form_observations(
+    disc,
+    x_coords,
+    y_coords,
+    example_coeff;
+    inflated_boundary = inflated_boundary,
+    A_boundary = A_boundary,
+    ys_boundary = ys_boundary,
+)
 Q_ϵ = 1e8
 
-condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint=cbp) # Trigger precompilation
-@timeit to "Conditioning + Node reordering" x_cond = condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint=cbp) # For Cholesky permutation
+condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # Trigger precompilation
+@timeit to "Conditioning + Node reordering" x_cond =
+    condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # For Cholesky permutation
 p = x_cond.inner_gmrf.solver_ref[].precision_chol.p
 
 cbp2 = CholeskySolverBlueprint(RBMCStrategy(50), p)
@@ -189,8 +233,17 @@ cbp2 = CholeskySolverBlueprint(RBMCStrategy(50), p)
 function solve_problem(idx)
     cur_to = TimerOutput()
     example_soln, example_coeff = get_problem(ds, idx)
-    @timeit cur_to "PDE Discretization" A, ys = form_observations(disc, x_coords, y_coords, example_coeff; inflated_boundary=inflated_boundary, A_boundary=A_boundary, ys_boundary=ys_boundary)
-    @timeit cur_to "Conditioning" x_cond = condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint=cbp2)
+    @timeit cur_to "PDE Discretization" A, ys = form_observations(
+        disc,
+        x_coords,
+        y_coords,
+        example_coeff;
+        inflated_boundary = inflated_boundary,
+        A_boundary = A_boundary,
+        ys_boundary = ys_boundary,
+    )
+    @timeit cur_to "Conditioning" x_cond =
+        condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp2)
     pred = to_mat(full_mean(x_cond), E, x_coords, y_coords)
     @timeit cur_to "Sampling" full_rand(Random.default_rng(), x_cond)
     @timeit cur_to "Std dev" cur_std = std(x_cond)
@@ -210,10 +263,12 @@ std_dev_times = Int64[]
 sampling_times = Int64[]
 pde_disc_times = Int64[]
 
-for i in 1:10
+for i = 1:10
     cur_rel_err, cur_rmse, cur_max_err, std_norm, cur_to = solve_problem(i)
     println("Relative error (%) = $(cur_rel_err * 100)")
-    println("RMSE: $(@sprintf("%.2e", cur_rmse)), Max error: $(@sprintf("%.2e", cur_max_err))")
+    println(
+        "RMSE: $(@sprintf("%.2e", cur_rmse)), Max error: $(@sprintf("%.2e", cur_max_err))",
+    )
     println("Std norm: $(@sprintf("%.2e", std_norm))")
     push!(rel_errs, cur_rel_err)
     push!(rmses, cur_rmse)
@@ -234,5 +289,5 @@ out_dict = Dict(
     "Conditioning times" => conditioning_times,
     "Std dev times" => std_dev_times,
     "Sampling times" => sampling_times,
-    "PDE discretization times" => pde_disc_times
+    "PDE discretization times" => pde_disc_times,
 )
