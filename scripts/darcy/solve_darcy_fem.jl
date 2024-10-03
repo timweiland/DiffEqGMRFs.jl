@@ -28,6 +28,10 @@ function parse_cmd()
         help = "Number of FEM elements in each direction"
         arg_type = Int
         default = 300
+        "--dry_run"
+        help = "Test run which does not go through the entire dataset"
+        arg_type = Bool
+        default = false
     end
     return parse_args(s)
 end
@@ -36,8 +40,9 @@ parsed_args = parse_cmd()
 ###### Params ######
 datasetname = parsed_args["datasetname"]
 N_xy = parsed_args["N_xy"]
+dry_run = parsed_args["dry_run"]
 beta = 1.0
-params = @strdict N_xy datasetname beta
+params = @strdict datasetname N_xy dry_run beta
 
 println(params)
 
@@ -174,7 +179,7 @@ max_errs = Float64[]
 solve_times = Int64[]
 pde_disc_times = Int64[]
 
-N_samples = Base.size(ds.darcy_vars["sol"], 1)
+N_samples = dry_run ? 3 : Base.size(ds.darcy_vars["sol"], 1)
 for i = 1:N_samples
     cur_rel_err, cur_rmse, cur_max_err, cur_to = solve_problem(i)
     push!(rel_errs, cur_rel_err)
