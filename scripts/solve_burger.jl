@@ -1,5 +1,5 @@
 using DiffEqGMRFs,
-    GMRFs, Ferrite, HDF5, GLMakie, SparseArrays, LinearAlgebra, LinearMaps, Printf
+    GMRFs, Ferrite, HDF5, Makie, SparseArrays, LinearAlgebra, LinearMaps, Printf
 
 function plot_example(x_coords, soln_mat)
     fig = Figure()
