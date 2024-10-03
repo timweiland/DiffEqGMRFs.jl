@@ -1,0 +1,50 @@
+Bootstrap: docker
+From: ubuntu:latest
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+    echo 'Etc/UTC' > /etc/timezone
+    apt update && apt upgrade -y
+    apt install -y apt-utils software-properties-common git rsync curl wget
+    add-apt-repository ppa:deadsnakes/ppa
+    apt update
+    
+    # Install Julia
+    export TARGET=https://julialang-s3.julialang.org/bin/linux/x64/1.10/julia-1.10.5-linux-x86_64.tar.gz
+    mkdir -p /opt/julia
+    cd /opt/julia
+    wget $TARGET
+    tar -xf julia-1.10.5-linux-x86_64.tar.gz
+    rm julia-1.10.5-linux-x86_64.tar.gz
+    export PATH=$PATH:/opt/julia/julia-1.10.5/bin
+    mkdir -p /opt/juliadepot
+    export JULIA_DEPOT_PATH=/opt/juliadepot
+    cd /opt && git clone https://github.com/timweiland/DiffEqGMRFs.jl
+    julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.update(); Pkg.build(); Pkg.instantiate()'
+    julia --project=/opt/DiffEqGMRFs.jl -e 'using DiffEqGMRFs'
+
+    ## Interactive Julia will write to logs, but we don't want
+    ## the container to be writable, so link it to tmpfs on host.
+    rm -rf /opt/juliadepot/logs
+    ln -s /dev/shm/ /opt/juliadepot/logs
+    # Get rid of the packages not needed for runtime
+    dnf remove -y wget
+
+%environment
+    export LC_ALL=C
+    export JULIA_DEPOT_PATH=/opt/juliadepot
+    export PATH=$PATH:/opt/julia/julia-1.10.5/bin
+    export JULIA_PROJECT=/opt/DiffEqGMRFs.jl
+
+%runscript
+    echo "Container was created $NOW"
+    echo "Arguments received: $*"
+    echo pwd
+    exec echo "$@"
+
+%labels
+    Author Tim Weiland
+
+%help
+    singularity exec image.sif julia --project=/opt/DiffEqGMRFs.jl
