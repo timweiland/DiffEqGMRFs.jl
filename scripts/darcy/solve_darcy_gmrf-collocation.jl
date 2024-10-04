@@ -23,7 +23,7 @@ function parse_cmd()
         "--datasetname"
         help = "Name of the Darcy flow dataset to use"
         arg_type = String
-        default = "piececonst_r241_N1024_smooth1"
+        default = "piececonst_r241_N1024_smooth2"
         "--N_xy"
         help = "Number of FEM elements in each direction"
         arg_type = Int
@@ -41,7 +41,7 @@ function parse_cmd()
 end
 parsed_args = parse_cmd()
 
-rng = MersenneTwister(523802340)
+rng = MersenneTwister(1854390)
 ###### Read data ######
 datasetname = parsed_args["datasetname"]
 N_xy = parsed_args["N_xy"]
@@ -89,40 +89,30 @@ form_prior(disc, 2, 1 / sqrt(N_xy)) # Trigger precompilation
 
 @timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
 
-if inflated_boundary
-    ch = ConstraintHandler(disc.dof_handler)
-    ∂Ω = disc.grid.facesets["Interior boundary"]
-    bc_u = Ferrite.Dirichlet(:u, ∂Ω, (x, t) -> 0.0)
-    add!(ch, bc_u)
-    close!(ch)
-else
-    ch = disc.constraint_handler
+@timeit to "Set up collocation matrices" begin
+    coll_step = (1 / (2 * N_xy))
+    coll_range = coll_step:coll_step:(1 - coll_step)
+    coll_grid = [Tensors.Vec(x, y) for x in coll_range for y in coll_range]
+    ∂²u∂x², ∂²u∂y² =
+        second_derivative_matrices(disc, coll_grid; derivative_idcs = [(1, 1), (2, 2)])
+    D = -(∂²u∂x² + ∂²u∂y²)
+    y = beta * ones(size(D, 1))
 end
+
 
 ##### DARCY OBSERVATIONS ######
 function form_observations(
     disc::FEMDiscretization,
-    x_coords,
-    y_coords,
-    example_coeff,
-    ch;
+    example_coeff;
     inflated_boundary = false,
     N_xy = 300,
-)        
-    D, ys_D, keep_dofs = assemble_darcy_diff_matrix(
-        disc,
-        x_coords,
-        y_coords,
-        example_coeff;
-        inflated_boundary = inflated_boundary,
-        beta=beta,
-        ch=ch
-    )
-    if keep_dofs !== nothing
-        D = D[keep_dofs, 1:end]
-        ys_D = ys_D[keep_dofs]
-    end
-    A, ys = D, ys_D
+)
+    coeffs = map(x -> get_xy_idcs(x, x_coords, y_coords), coll_grid)
+    coeffs = [example_coeff[point[1], point[2]] for point in coeffs]
+    coeff_diag = Diagonal(coeffs)
+    D_flow = (1e-5 * coeff_diag * D)
+
+    A, ys = D_flow, (1e-5 * y)
 
     if inflated_boundary
         boundary_step = (1 / N_xy)
@@ -143,10 +133,7 @@ end
 
 A, ys = form_observations(
     disc,
-    x_coords,
-    y_coords,
-    example_coeff,
-    ch;
+    example_coeff;
     inflated_boundary = inflated_boundary,
     N_xy = N_xy
 )
@@ -171,10 +158,7 @@ function solve_problem(idx)
     example_soln, example_coeff = get_problem(ds, idx)
     @timeit cur_to "PDE Discretization" A, ys = form_observations(
         disc,
-        x_coords,
-        y_coords,
-        example_coeff,
-        ch;
+        example_coeff;
         inflated_boundary = inflated_boundary,
         N_xy = N_xy
     )
@@ -216,6 +200,6 @@ for i = 1:N_samples
 end
 
 out_dict = @strdict rel_errs rmses max_errs std_norms conditioning_times std_dev_times sampling_times pde_disc_times
-out_dict = merge(out_dict, params, @strdict mat_nnz chol_nnz to)
+out_dict = merge(out_dict, params, @strdict mat_nnz chol_nnz)
 
-@tagsave(datadir("sims", "darcy", "gmrf-fem", savename(params, "jld2")), out_dict)
+@tagsave(datadir("sims", "darcy", "gmrf-colloc", savename(params, "jld2")), out_dict)
