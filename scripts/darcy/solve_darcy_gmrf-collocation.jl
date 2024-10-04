@@ -12,9 +12,17 @@ using Distributions,
     Printf,
     TimerOutputs,
     Random,
-    ArgParse
+    ArgParse,
+    Logging,
+    LoggingExtras
 using Distributions
 import Base: show
+
+logger = FormatLogger() do io, args
+    println(io, "[", args.level, "] ", args.message)
+end;
+
+global_logger(logger)
 
 ###### Argparse ######
 function parse_cmd()
@@ -50,7 +58,7 @@ dry_run = parsed_args["dry_run"]
 beta = 1.0
 params = @strdict datasetname N_xy boundary_width dry_run beta
 
-println(params)
+@info params
 
 const to = TimerOutput()
 
@@ -195,7 +203,7 @@ for i = 1:N_samples
     push!(sampling_times, TimerOutputs.time(cur_to["Sampling"]))
     push!(pde_disc_times, TimerOutputs.time(cur_to["PDE Discretization"]))
     if i % 10 == 0
-        println("Finished $i / $N_samples ($((i / N_samples) * 100)%)")
+        @info "Finished $i / $N_samples ($((i / N_samples) * 100)%)"
     end
 end
 
