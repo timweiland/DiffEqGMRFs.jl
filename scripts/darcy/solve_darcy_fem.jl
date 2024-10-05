@@ -18,6 +18,9 @@ using Distributions,
 import Base: show
 
 logger = FormatLogger() do io, args
+    if args.level == Logging.Debug
+        return
+    end
     println(io, "[", args.level, "] ", args.message)
 end;
 
