@@ -54,6 +54,7 @@ dry_run = parsed_args["dry_run"]
 beta = 1.0
 params = @strdict datasetname N_xy dry_run beta
 
+@info Sys.cpu_summary()
 @info params
 
 const to = TimerOutput()
