@@ -1,6 +1,6 @@
 using Ferrite, GMRFs
 
-export get_periodic_constraint, uniform_unit_square_discretization
+export get_periodic_constraint, uniform_unit_square_discretization, periodic_unit_interval_discretization
 
 function get_periodic_constraint(grid::Ferrite.Grid{1})
     cellidx_left, dofidx_left = collect(grid.facesets["left"])[1]
@@ -47,5 +47,14 @@ function uniform_unit_square_discretization(N_xy; boundary_width = 0.0, use_diri
         bc_u = Ferrite.Dirichlet(:u, ∂Ω, (x, t) -> 0.0)
         push!(bcs, bc_u)
     end
+    return FEMDiscretization(grid, ip, qr, [(:u, 1)], bcs)
+end
+
+function periodic_unit_interval_discretization(N_x; element_order=2)
+    grid = generate_grid(QuadraticLine, (N_x,), Tensors.Vec(0.0), Tensors.Vec(1.0))
+    ip = Lagrange{1, RefCube, element_order}()
+    qr = QuadratureRule{1, RefCube}(element_order + 1)
+
+    bcs = [get_periodic_constraint(grid)]
     return FEMDiscretization(grid, ip, qr, [(:u, 1)], bcs)
 end
