@@ -90,7 +90,7 @@ function solve_problem(idx)
         example_coeff;
         inflated_boundary = false,
     )
-    @timeit cur_to "Linear solve" (u = K \ f; apply!(u, disc.constraint_handler))
+    @timeit cur_to "Linear solve" (c = cholesky(Symmetric(K)); u = c \ f; apply!(u, disc.constraint_handler))
     pred = to_mat(u, E, x_coords, y_coords)
     cur_rel_err = rel_err(pred, example_soln)
     cur_rmse = rmse(pred, example_soln)
