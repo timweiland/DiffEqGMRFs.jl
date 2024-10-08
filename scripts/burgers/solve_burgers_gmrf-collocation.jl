@@ -276,10 +276,6 @@ function solve_problem(idx)
     cur_max_err = max_err(pred, example_soln_no_t0)
     std_norm = norm(cur_std)
     N_newton_steps = length(gno.r_obs_norm_history) - 1
-    @info cur_to
-    @info cur_rel_err
-    @info sqmahal_to_soln
-    @info cur_nll
     return cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_steps, mat_nnz, chol_nnz, sqmahal_to_soln, cur_nll, cur_to
 end
 
