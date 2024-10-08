@@ -121,13 +121,13 @@ function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_
     return GMRFs.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
 end
 
-function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation)
+function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation, matern_temporal_lengthscale)
     ν_matern_spatial = 3 // 2
     desired_range_spatial = sqrt(1 / N_collocation)
     κ = √(8ν_matern_spatial) / desired_range_spatial
 
     ν_matern_temporal = 1 // 2
-    desired_range_temporal = 0.5
+    desired_range_temporal = matern_temporal_lengthscale
     κ_temporal = √(8ν_matern_temporal) / desired_range_temporal
 
     temporal_matern = MaternSPDE{1}(κ_temporal, ν_matern_temporal, 0.1)
@@ -136,20 +136,18 @@ function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation)
     return product_matern(temporal_matern, length(ts), spatial_matern, disc; solver_blueprint = CholeskySolverBlueprint(RBMCStrategy(50)))
 end
 
-function form_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers, prior_type)
+function form_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers, prior_type, matern_temporal_lengthscale)
     if prior_type == "adv_diff"
-        @info "Using advection-diffusion prior"
         return form_adv_diff_prior(disc, ts, ic, N_collocation, ν_burgers)
     elseif prior_type == "product_matern"
-        @info "Using product Matern prior"
-        return form_product_matern_prior(disc, ts, N_collocation)
+        return form_product_matern_prior(disc, ts, N_collocation, matern_temporal_lengthscale)
     else
         error("Unknown prior type: $prior_type")
     end
 end
 
-x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
-@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
+x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
+@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
 
 @timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
 
@@ -194,20 +192,40 @@ end
 noise_ic = 1e8
 noise_collocation = 1e8
 
+A_soln = evaluation_matrix(disc, [Tensors.Vec(Float64(x)) for x in x_coords])
+A_soln = vcat([spatial_to_spatiotemporal(A_soln, t, length(ts)) for t in eachindex(ts)]...)
+
+function interpolate_solution(x_prior, solution_mat, ys_ic)
+    soln_mat = copy(solution_mat)
+    soln_mat[1, :] = ys_ic
+    ys_soln = reshape(soln_mat', (length(x_coords) * length(ts),))
+    x_soln = condition_on_observations(x_prior, A_soln, 1e12, ys_soln; solver_blueprint = cbp)
+    return mean(x_soln)
+end
+
+function get_log_det_Σ(x_final)
+    L_diag = diag(sparse(x_final.inner_gmrf.solver_ref[].precision_chol.L))
+    return -2 * sum(log.(L_diag))
+end
+
+function nll_soln(x_final, sqmahal_to_soln)
+    return 0.5 * (length(x_final) * log(2π) + sqmahal_to_soln + get_log_det_Σ(x_final))
+end
+
 function solve_problem(idx)
     cur_to = TimerOutput()
     example_ic, example_soln = get_initial_condition(ds, idx), get_solution(ds, idx)
-    example_soln = example_soln[2:end, 1:end]
+    example_soln_no_t0 = example_soln[2:end, 1:end]
     ys_ic = example_ic
 
-    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
+    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
     @timeit cur_to "Initial condition" x_ic = condition_on_observations(x, A_ic, noise_ic, ys_ic; solver_blueprint = cbp)
 
     ic_pred = to_mat(full_mean(x_ic), E, ts, x_coords)
     ic_pred = ic_pred[2:end, 1:end]
-    ic_rel_err = rel_err(ic_pred, example_soln)
-    ic_rmse = rmse(ic_pred, example_soln)
-    ic_max_err = max_err(ic_pred, example_soln)
+    ic_rel_err = rel_err(ic_pred, example_soln_no_t0)
+    ic_rmse = rmse(ic_pred, example_soln_no_t0)
+    ic_max_err = max_err(ic_pred, example_soln_no_t0)
 
     p = x_ic.inner_gmrf.solver_ref[].precision_chol.p
     gncbp = GNCholeskySolverBlueprint(p)
@@ -244,19 +262,25 @@ function solve_problem(idx)
     end
     mat_nnz = nnz(to_matrix(precision_map(x_final)))
     chol_nnz = nnz(x_final.inner_gmrf.solver_ref[].precision_chol)
+
+    soln_dofs = interpolate_solution(x, example_soln, ys_ic)
+    sqmahal_to_soln = sqmahal(x_final, soln_dofs)
+    cur_nll = nll_soln(x_final, sqmahal_to_soln)
     
     pred = to_mat(full_mean(x_final), E, ts, x_coords)
     pred = pred[2:end, 1:end]
     @timeit cur_to "Sampling" full_rand(rng, x_final)
     @timeit cur_to "Std dev" cur_std = std(x_final)
-    cur_rel_err = rel_err(pred, example_soln)
-    cur_rmse = rmse(pred, example_soln)
-    cur_max_err = max_err(pred, example_soln)
+    cur_rel_err = rel_err(pred, example_soln_no_t0)
+    cur_rmse = rmse(pred, example_soln_no_t0)
+    cur_max_err = max_err(pred, example_soln_no_t0)
     std_norm = norm(cur_std)
     N_newton_steps = length(gno.r_obs_norm_history) - 1
     @info cur_to
     @info cur_rel_err
-    return cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_steps, mat_nnz, chol_nnz, cur_to
+    @info sqmahal_to_soln
+    @info cur_nll
+    return cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_steps, mat_nnz, chol_nnz, sqmahal_to_soln, cur_nll, cur_to
 end
 
 rel_errs = Float64[]
@@ -274,11 +298,13 @@ optimization_times = Int64[]
 sampling_times = Int64[]
 mat_nnzs = Int64[]
 chol_nnzs = Int64[]
+sqmahals = Float64[]
+nlls = Float64[]
 
 N_samples = dry_run ? 3 : length(ds)
 @info "Beginning to solve $N_samples problems"
 for i = 1:N_samples
-    cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_step, mat_nnz, chol_nnz, cur_to = solve_problem(i)
+    cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_step, mat_nnz, chol_nnz, cur_sqmahal, cur_nll, cur_to = solve_problem(i)
     push!(rel_errs, cur_rel_err)
     push!(rmses, cur_rmse)
     push!(max_errs, cur_max_err)
@@ -289,6 +315,8 @@ for i = 1:N_samples
     push!(N_newton_steps, N_newton_step)
     push!(mat_nnzs, mat_nnz)
     push!(chol_nnzs, chol_nnz)
+    push!(sqmahals, cur_sqmahal)
+    push!(nlls, cur_nll)
     push!(prior_times, TimerOutputs.time(cur_to["Prior"]))
     push!(initial_condition_times, TimerOutputs.time(cur_to["Initial condition"]))
     push!(std_dev_times, TimerOutputs.time(cur_to["Std dev"]))
@@ -299,7 +327,7 @@ for i = 1:N_samples
     end
 end
 
-out_dict = @strdict rel_errs rmses max_errs ic_rel_errs ic_rmses ic_max_errs std_norms N_newton_steps prior_times initial_condition_times std_dev_times sampling_times optimization_times mat_nnzs chol_nnzs
+out_dict = @strdict rel_errs rmses max_errs ic_rel_errs ic_rmses ic_max_errs std_norms N_newton_steps prior_times initial_condition_times std_dev_times sampling_times optimization_times mat_nnzs chol_nnzs sqmahals nlls
 out_dict = merge(out_dict, parameters, @strdict to)
 
-@tagsave(datadir("sims", "burgers", "gmrf-fem", savename(parameters, "jld2")), out_dict)
+@tagsave(datadir("sims", "burgers", "gmrf-collocation", savename(parameters, "jld2")), out_dict)
