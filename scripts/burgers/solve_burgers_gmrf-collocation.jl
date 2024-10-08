@@ -36,10 +36,22 @@ function parse_cmd()
         help = "Name of the Burgers dataset to use"
         arg_type = String
         default = "burgers_v100_t100_r1024_N2048"
-        "--N_x"
-        help = "Number of FEM elements"
+        "--N_basis"
+        help = "Number of FEM basis elements"
         arg_type = Int
-        default = 800
+        default = 750
+        "--N_collocation"
+        help = "Number of collocation points"
+        arg_type = Int
+        default = 750
+        "--prior_type"
+        help = "Prior type to use. adv_diff or product_matern"
+        arg_type = String
+        default = "adv_diff"
+        "--matern_temporal_lengthscale"
+        help = "Temporal lengthscale for Matern prior"
+        arg_type = Float64
+        default = 0.5
         "--dry_run"
         help = "Test run which does not go through the entire dataset"
         arg_type = Bool
@@ -49,13 +61,16 @@ function parse_cmd()
 end
 parsed_args = parse_cmd()
 
-rng = MersenneTwister(345903459)
+rng = MersenneTwister(985368934)
 ###### Read data ######
 datasetname = parsed_args["datasetname"]
-N_x = parsed_args["N_x"]
+N_basis = parsed_args["N_basis"]
+N_collocation = parsed_args["N_collocation"]
+prior_type = parsed_args["prior_type"]
+matern_temporal_lengthscale = parsed_args["matern_temporal_lengthscale"]
 dry_run = parsed_args["dry_run"]
-# beta = 1.0
-parameters = @strdict datasetname N_x dry_run
+
+parameters = @strdict datasetname N_basis N_collocation prior_type matern_temporal_lengthscale dry_run
 
 @info parameters
 
@@ -68,8 +83,8 @@ example_ic, example_solution = get_initial_condition(ds, 2), get_solution(ds, 2)
 x_coords, ts = ds.x_coords, ds.ts
 
 ###### Form discretization ######
-periodic_unit_interval_discretization(N_x; element_order=2) # Trigger precompilation
-@timeit to "Mesh generation" disc = periodic_unit_interval_discretization(N_x; element_order=2)
+periodic_unit_interval_discretization(N_basis; element_order=2) # Trigger precompilation
+@timeit to "Mesh generation" disc = periodic_unit_interval_discretization(N_basis; element_order=2)
 
 @timeit to "Etc" begin
     pred_coords = [Tensors.Vec(Float64(x)) for x in x_coords]
@@ -83,11 +98,11 @@ function to_mat(dof_vals, E, ts, x_coords)
 end
 
 ###### Prior ######
-function form_prior(disc::FEMDiscretization, ts, ic, N_x, ν_burgers)
+function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers)
     bulk_speed = mean(ic)
 
     ν_matern = 3 // 2
-    desired_range = sqrt(1 / N_x)
+    desired_range = sqrt(1 / N_collocation)
     κ = √(8ν_matern) / desired_range
 
     c = 1 / (ν_burgers)
@@ -106,50 +121,78 @@ function form_prior(disc::FEMDiscretization, ts, ic, N_x, ν_burgers)
     return GMRFs.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
 end
 
-x = form_prior(disc, ts, example_ic, N_x, ds.ν) # Trigger precompilation
-@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_x, ds.ν)
-cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation)
+    ν_matern_spatial = 3 // 2
+    desired_range_spatial = sqrt(1 / N_collocation)
+    κ = √(8ν_matern_spatial) / desired_range_spatial
 
-# Runtime for A_ic is negligible (try it)
+    ν_matern_temporal = 1 // 2
+    desired_range_temporal = 0.5
+    κ_temporal = √(8ν_matern_temporal) / desired_range_temporal
+
+    temporal_matern = MaternSPDE{1}(κ_temporal, ν_matern_temporal, 0.1)
+    spatial_matern = MaternSPDE{1}(κ, ν_matern_spatial, 0.1)
+
+    return product_matern(temporal_matern, length(ts), spatial_matern, disc; solver_blueprint = CholeskySolverBlueprint(RBMCStrategy(50)))
+end
+
+function form_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers, prior_type)
+    if prior_type == "adv_diff"
+        @info "Using advection-diffusion prior"
+        return form_adv_diff_prior(disc, ts, ic, N_collocation, ν_burgers)
+    elseif prior_type == "product_matern"
+        @info "Using product Matern prior"
+        return form_product_matern_prior(disc, ts, N_collocation)
+    else
+        error("Unknown prior type: $prior_type")
+    end
+end
+
+x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
+@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
+
+@timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+
 A_ic = evaluation_matrix(disc, [Tensors.Vec(Float64(x)) for x in x_coords])
 A_ic = spatial_to_spatiotemporal(A_ic, 1, length(ts))
+ys_ic = example_ic
 
-### FEM
+x_ic = condition_on_observations(x, A_ic, 1e8, ys_ic; solver_blueprint = cbp)
+
+### Collocation
 @timeit to "PDE Discretization (Linear part)" begin
-    M, G = assemble_burgers_mass_diffusion_matrices(disc; lumping=false)
-    Ms = [spatial_to_spatiotemporal(M, t, length(ts)) for t in 1:length(ts)]
-    Mₜ = vcat(Ms[1:end-1]...)
-    Mₜ₊₁ = vcat(Ms[2:end]...)
-    Gₜ₊₁ = vcat([spatial_to_spatiotemporal(G, t, length(ts)) for t in 2:length(ts)]...)
+    dx = 1 / N_collocation
+    coll_grid = range(x_coords[1] + dx, x_coords[end] - dx, length = N_collocation)
+    coll_grid = [Tensors.Vec(x) for x in coll_grid]
+    A_coll = evaluation_matrix(disc, coll_grid)
+    ∂u∂x = derivative_matrices(disc, coll_grid; derivative_idcs = [1])[1]
+    ∂²u∂x² = second_derivative_matrices(disc, coll_grid; derivative_idcs = [(1, 1)])[1]
+
     dt = Float64(step(ts))
-    J_static = Mₜ₊₁ - Mₜ + dt * ds.ν * Gₜ₊₁
+    Aₜ = vcat([spatial_to_spatiotemporal(A_coll, i, length(ts)) for i = 1:(length(ts)-1)]...)
+    Aₜ₊₁ = vcat([spatial_to_spatiotemporal(A_coll, i, length(ts)) for i = 2:length(ts)]...)
+    ∂uₜ₊₁∂x = vcat([spatial_to_spatiotemporal(∂u∂x, i, length(ts)) for i = 2:length(ts)]...)
+    ∂²uₜ₊₁∂x² = vcat([spatial_to_spatiotemporal(∂²u∂x², i, length(ts)) for i = 2:length(ts)]...)
+    y = spzeros(size(Aₜ, 1))
+    Aₜ, y = constrainify_linear_system(Aₜ, y, x_ic)
+    Aₜ₊₁, y = constrainify_linear_system(Aₜ₊₁, y, x_ic)
+    ∂uₜ₊₁∂x, y = constrainify_linear_system(∂uₜ₊₁∂x, y, x_ic)
+    ∂²uₜ₊₁∂x², y = constrainify_linear_system(∂²uₜ₊₁∂x², y, x_ic)
+
+    ν_burger = ds.ν
+    J_static = Aₜ₊₁ - Aₜ - dt * ν_burger * ∂²uₜ₊₁∂x²
 end
 
-N_spatial = ndofs(disc)
-function nonlinear_primal_tangent(μₖ)
-    Js = SparseMatrixCSC{Float64}[]
-    vs = Vector{Float64}[]
-    for t in 2:length(ts)
-        cur_μ = μₖ[(t - 1) * N_spatial + 1:t * N_spatial]
-        Js_t, vs_t = assemble_burgers_advection_matrix(disc, cur_μ)
-        Js_t = spatial_to_spatiotemporal(Js_t, t, length(ts))
-        push!(Js, Js_t)
-        push!(vs, vs_t)
-    end
-    J = vcat(Js...)
-    v = vcat(vs...)
-    return v, J
-end
-
-function f_and_J(w, x_ic)
-    f_adv, J_adv = nonlinear_primal_tangent(transform_free_to_full(x_ic, w))
-    f = J_static * w + dt * f_adv
-    J = J_static + dt * J_adv
+function f_and_J(w)
+    Aₜ₊₁_mul_w = Aₜ₊₁ * w
+    ∂uₜ₊₁∂x_mul_w = ∂uₜ₊₁∂x * w
+    f = Aₜ₊₁_mul_w - Aₜ * w + dt * Aₜ₊₁_mul_w .* ∂uₜ₊₁∂x_mul_w - dt * ν_burger * ∂²uₜ₊₁∂x² * w
+    J = J_static + dt * (Diagonal(∂uₜ₊₁∂x_mul_w) * Aₜ₊₁ + Diagonal(Aₜ₊₁_mul_w) * ∂uₜ₊₁∂x)
     return f, J
 end
 
 noise_ic = 1e8
-noise_fem = 1e12
+noise_collocation = 1e8
 
 function solve_problem(idx)
     cur_to = TimerOutput()
@@ -157,7 +200,7 @@ function solve_problem(idx)
     example_soln = example_soln[2:end, 1:end]
     ys_ic = example_ic
 
-    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_x, ds.ν)
+    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type)
     @timeit cur_to "Initial condition" x_ic = condition_on_observations(x, A_ic, noise_ic, ys_ic; solver_blueprint = cbp)
 
     ic_pred = to_mat(full_mean(x_ic), E, ts, x_coords)
@@ -169,11 +212,12 @@ function solve_problem(idx)
     p = x_ic.inner_gmrf.solver_ref[].precision_chol.p
     gncbp = GNCholeskySolverBlueprint(p)
 
+
     gno = GaussNewtonOptimizer(
         mean(x_ic),
         precision_map(x_ic),
-        x -> f_and_J(x, x_ic),
-        noise_fem,
+        f_and_J,
+        noise_collocation,
         zeros(size(J_static, 1)),
         mean(x_ic);
         solver_bp=gncbp,
@@ -183,12 +227,11 @@ function solve_problem(idx)
 
         J_final = gno.Jₖ
         Q = gno.Q_mat
-        new_precision = LinearMap(Q + noise_fem * J_final' * J_final)
-        x_final_inner = ImplicitEulerConstantMeshSTGMRF(
+        new_precision = LinearMap(Q + noise_ic * J_final' * J_final)
+        x_final_inner = ConcreteConstantMeshSTGMRF(
             gno.xₖ,
             new_precision,
             disc,
-            x_ic.inner_gmrf.prior.ssm,
             CholeskySolverBlueprint(RBMCStrategy(50), p),
         )
         x_final = ConstrainedGMRF(
@@ -211,6 +254,8 @@ function solve_problem(idx)
     cur_max_err = max_err(pred, example_soln)
     std_norm = norm(cur_std)
     N_newton_steps = length(gno.r_obs_norm_history) - 1
+    @info cur_to
+    @info cur_rel_err
     return cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_steps, mat_nnz, chol_nnz, cur_to
 end
 
