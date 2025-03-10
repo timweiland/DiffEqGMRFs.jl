@@ -60,6 +60,10 @@ function parse_cmd()
         help = "Test run which does not go through the entire dataset"
         arg_type = Bool
         default = true
+        "--N_samples"
+        help = "Number of example problems to solve"
+        arg_type = Int
+        default = 100
     end
     return parse_args(s)
 end
@@ -74,8 +78,9 @@ prior_type = parsed_args["prior_type"]
 matern_temporal_lengthscale = parsed_args["matern_temporal_lengthscale"]
 matern_spatial_lengthscale = parsed_args["matern_spatial_lengthscale"]
 dry_run = parsed_args["dry_run"]
+N_samples = parsed_args["N_samples"]
 
-parameters = @strdict datasetname N_basis N_collocation prior_type matern_temporal_lengthscale matern_spatial_lengthscale dry_run
+parameters = @strdict datasetname N_basis N_collocation prior_type matern_temporal_lengthscale matern_spatial_lengthscale dry_run N_samples
 
 @info parameters
 
@@ -287,7 +292,9 @@ chol_nnzs = Int64[]
 sqmahals = Float64[]
 nlls = Float64[]
 
-N_samples = dry_run ? 3 : length(ds)
+if dry_run
+    N_samples = 3
+end
 @info "Beginning to solve $N_samples problems"
 for i = 1:N_samples
     cur_rel_err, cur_rmse, cur_max_err, ic_rel_err, ic_rmse, ic_max_err, std_norm, N_newton_step, mat_nnz, chol_nnz, cur_sqmahal, cur_nll, cur_to = solve_problem(i)

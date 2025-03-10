@@ -3,7 +3,6 @@ From: ubuntu:latest
 
 %setup
     mkdir -p $SINGULARITY_ROOTFS/opt/DiffEqGMRFs.jl
-    mkdir -p $SINGULARITY_ROOTFS/opt/GaussianMarkovRandomFields.jl
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -24,7 +23,7 @@ From: ubuntu:latest
     export PATH=$PATH:/opt/julia/julia-1.10.5/bin
     mkdir -p /opt/juliadepot
     export JULIA_DEPOT_PATH=/opt/juliadepot
-    julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.develop(path="/opt/GaussianMarkovRandomFields.jl")'
+    julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.add(url="https://github.com/timweiland/GaussianMarkovRandomFields.jl")'
     julia --project=/opt/DiffEqGMRFs.jl -e 'using Pkg; Pkg.update(); Pkg.build(); Pkg.instantiate()'
     julia --project=/opt/DiffEqGMRFs.jl -e 'using DiffEqGMRFs'
 
