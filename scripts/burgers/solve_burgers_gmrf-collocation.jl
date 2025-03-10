@@ -51,7 +51,11 @@ function parse_cmd()
         "--matern_temporal_lengthscale"
         help = "Temporal lengthscale for Matern prior"
         arg_type = Float64
-        default = 0.5
+        default = 3.0
+        "--matern_spatial_lengthscale"
+        help = "Spatial lengthscale for Matern prior"
+        arg_type = Float64
+        default = 0.02
         "--dry_run"
         help = "Test run which does not go through the entire dataset"
         arg_type = Bool
@@ -68,9 +72,10 @@ N_basis = parsed_args["N_basis"]
 N_collocation = parsed_args["N_collocation"]
 prior_type = parsed_args["prior_type"]
 matern_temporal_lengthscale = parsed_args["matern_temporal_lengthscale"]
+matern_spatial_lengthscale = parsed_args["matern_spatial_lengthscale"]
 dry_run = parsed_args["dry_run"]
 
-parameters = @strdict datasetname N_basis N_collocation prior_type matern_temporal_lengthscale dry_run
+parameters = @strdict datasetname N_basis N_collocation prior_type matern_temporal_lengthscale matern_spatial_lengthscale dry_run
 
 @info parameters
 
@@ -98,12 +103,11 @@ function to_mat(dof_vals, E, ts, x_coords)
 end
 
 ###### Prior ######
-function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers)
+function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, ν_burgers, matern_spatial_lengthscale)
     bulk_speed = mean(ic)
 
     ν_matern = 3 // 2
-    #desired_range = sqrt(1 / N_collocation)
-    desired_range = 0.02
+    desired_range = matern_spatial_lengthscale
     κ = √(8ν_matern) / desired_range
 
     c = 1 / (ν_burgers)
@@ -122,34 +126,25 @@ function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_
     return GaussianMarkovRandomFields.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
 end
 
-function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation, matern_temporal_lengthscale)
-    #ν_matern_spatial = 3 // 2
-    #desired_range_spatial = sqrt(1 / N_collocation)
-    #κ = √(8ν_matern_spatial) / desired_range_spatial
-
-    desired_range_spatial = 0.02
-    #ν_matern_temporal = 1 // 2
-    desired_range_temporal = matern_temporal_lengthscale
-    #κ_temporal = √(8ν_matern_temporal) / desired_range_temporal
-
-    temporal_matern = MaternSPDE{1}(range=desired_range_temporal, smoothness=0, σ²=0.1)
-    spatial_matern = MaternSPDE{1}(range=desired_range_spatial, smoothness=3, σ²=0.1)
+function form_product_matern_prior(disc::FEMDiscretization, ts, matern_temporal_lengthscale, matern_spatial_lengthscale)
+    temporal_matern = MaternSPDE{1}(range=matern_temporal_lengthscale, smoothness=0, σ²=0.1)
+    spatial_matern = MaternSPDE{1}(range=matern_spatial_lengthscale, smoothness=3, σ²=0.1)
 
     return product_matern(temporal_matern, length(ts), spatial_matern, disc; solver_blueprint = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50)))
 end
 
-function form_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers, prior_type, matern_temporal_lengthscale)
+function form_prior(disc::FEMDiscretization, ts, ic, ν_burgers, prior_type, matern_temporal_lengthscale, matern_spatial_lengthscale)
     if prior_type == "adv_diff"
-        return form_adv_diff_prior(disc, ts, ic, N_collocation, ν_burgers)
+        return form_adv_diff_prior(disc, ts, ic, ν_burgers, matern_spatial_lengthscale)
     elseif prior_type == "product_matern"
-        return form_product_matern_prior(disc, ts, N_collocation, matern_temporal_lengthscale)
+        return form_product_matern_prior(disc, ts, matern_temporal_lengthscale, matern_spatial_lengthscale)
     else
         error("Unknown prior type: $prior_type")
     end
 end
 
-x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
-@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
+x = form_prior(disc, ts, example_ic, ds.ν, prior_type, matern_temporal_lengthscale, matern_spatial_lengthscale)
+@timeit to "Prior construction" x = form_prior(disc, ts, example_ic, ds.ν, prior_type, matern_temporal_lengthscale, matern_spatial_lengthscale)
 
 @timeit to "Etc" cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng))
 
@@ -220,7 +215,7 @@ function solve_problem(idx)
     example_soln_no_t0 = example_soln[2:end, 1:end]
     ys_ic = example_ic
 
-    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
+    @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, ds.ν, prior_type, matern_temporal_lengthscale, matern_spatial_lengthscale)
     @timeit cur_to "Initial condition" x_ic = condition_on_observations(x, A_ic, noise_ic, ys_ic; solver_blueprint = cbp)
 
     ic_pred = to_mat(mean(x_ic), E, ts, x_coords)
