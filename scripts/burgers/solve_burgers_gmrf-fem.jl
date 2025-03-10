@@ -3,7 +3,7 @@ using DrWatson
 
 using Distributions,
     DiffEqGMRFs,
-    GMRFs,
+    GaussianMarkovRandomFields,
     Ferrite,
     HDF5,
     SparseArrays,
@@ -93,22 +93,22 @@ function form_prior(disc::FEMDiscretization, ts, ic, N_x, ν_burgers)
     c = 1 / (ν_burgers)
     γ = -c * bulk_speed
     spde = AdvectionDiffusionSPDE{1}(
-        0.0,
-        1 // 1,
-        1.0 * ones(1, 1),
-        [γ],
-        c,
-        0.1 * sqrt(c),
-        ν_matern,
-        κ,
+        κ=0.0,
+        α=1 // 1,
+        H=1.0 * ones(1, 1),
+        γ=[γ],
+        c=c,
+        τ=0.1 * sqrt(c),
+        spatial_spde = MaternSPDE{1}(κ=κ, ν=ν_matern),
+        initial_spde = MaternSPDE{1}(κ=κ, ν=ν_matern)
     )
 
-    return GMRFs.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
+    return GaussianMarkovRandomFields.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
 end
 
 x = form_prior(disc, ts, example_ic, N_x, ds.ν) # Trigger precompilation
 @timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_x, ds.ν)
-cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng))
 
 # Runtime for A_ic is negligible (try it)
 A_ic = evaluation_matrix(disc, [Tensors.Vec(Float64(x)) for x in x_coords])
@@ -141,8 +141,8 @@ function nonlinear_primal_tangent(μₖ)
     return v, J
 end
 
-function f_and_J(w, x_ic)
-    f_adv, J_adv = nonlinear_primal_tangent(transform_free_to_full(x_ic, w))
+function f_and_J(w)
+    f_adv, J_adv = nonlinear_primal_tangent(w)
     f = J_static * w + dt * f_adv
     J = J_static + dt * J_adv
     return f, J
@@ -160,19 +160,19 @@ function solve_problem(idx)
     @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_x, ds.ν)
     @timeit cur_to "Initial condition" x_ic = condition_on_observations(x, A_ic, noise_ic, ys_ic; solver_blueprint = cbp)
 
-    ic_pred = to_mat(full_mean(x_ic), E, ts, x_coords)
+    ic_pred = to_mat(mean(x_ic), E, ts, x_coords)
     ic_pred = ic_pred[2:end, 1:end]
     ic_rel_err = rel_err(ic_pred, example_soln)
     ic_rmse = rmse(ic_pred, example_soln)
     ic_max_err = max_err(ic_pred, example_soln)
 
-    p = x_ic.inner_gmrf.solver_ref[].precision_chol.p
+    p = x_ic.solver_ref[].precision_chol.p
     gncbp = GNCholeskySolverBlueprint(p)
 
     gno = GaussNewtonOptimizer(
         mean(x_ic),
         precision_map(x_ic),
-        x -> f_and_J(x, x_ic),
+        f_and_J,
         noise_fem,
         zeros(size(J_static, 1)),
         mean(x_ic);
@@ -184,27 +184,20 @@ function solve_problem(idx)
         J_final = gno.Jₖ
         Q = gno.Q_mat
         new_precision = LinearMap(Q + noise_fem * J_final' * J_final)
-        x_final_inner = ImplicitEulerConstantMeshSTGMRF(
+        x_final = ImplicitEulerConstantMeshSTGMRF(
             gno.xₖ,
             new_precision,
             disc,
-            x_ic.inner_gmrf.prior.ssm,
-            CholeskySolverBlueprint(RBMCStrategy(50), p),
-        )
-        x_final = ConstrainedGMRF(
-            x_final_inner,
-            x_ic.prescribed_dofs,
-            x_ic.free_dofs,
-            x_ic.free_to_prescribed_mat,
-            x_ic.free_to_prescribed_offset,
+            x_ic.prior.ssm,
+            CholeskySolverBlueprint(var_strategy=RBMCStrategy(50), perm=p),
         )
     end
     mat_nnz = nnz(to_matrix(precision_map(x_final)))
-    chol_nnz = nnz(x_final.inner_gmrf.solver_ref[].precision_chol)
+    chol_nnz = nnz(x_final.solver_ref[].precision_chol)
     
-    pred = to_mat(full_mean(x_final), E, ts, x_coords)
+    pred = to_mat(mean(x_final), E, ts, x_coords)
     pred = pred[2:end, 1:end]
-    @timeit cur_to "Sampling" full_rand(rng, x_final)
+    @timeit cur_to "Sampling" rand(rng, x_final)
     @timeit cur_to "Std dev" cur_std = std(x_final)
     cur_rel_err = rel_err(pred, example_soln)
     cur_rmse = rmse(pred, example_soln)

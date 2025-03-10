@@ -1,4 +1,4 @@
-using Ferrite, GMRFs, LinearAlgebra, SparseArrays
+using Ferrite, GaussianMarkovRandomFields, LinearAlgebra, SparseArrays
 
 export assemble_burgers_advection_matrix, assemble_burgers_mass_diffusion_matrices
 
@@ -9,11 +9,11 @@ function assemble_burgers_advection_matrix(
 )
     dh = disc.dof_handler
 
-    cellvalues = CellScalarValues(disc.quadrature_rule, disc.interpolation)
+    cellvalues = CellValues(disc.quadrature_rule, disc.interpolation, disc.geom_interpolation)
     n_basefuncs = getnbasefunctions(cellvalues)
     # Reset to 0
 
-    G = create_sparsity_pattern(dh, ch)
+    G = allocate_matrix(dh, ch)
     v = zeros(ndofs(dh))
     assembler = start_assemble(G, v)
     Ge = zeros(ndofs_per_cell(dh), ndofs_per_cell(dh))
@@ -52,6 +52,9 @@ function assemble_burgers_advection_matrix(
     end
     apply!(G, v, ch)
     v[ch.prescribed_dofs] .= 0.0
+    for dof in ch.prescribed_dofs
+        G[dof, dof] = 0.0
+    end
     return G, v
 end
 
@@ -62,10 +65,10 @@ function assemble_burgers_mass_diffusion_matrices(
 )
     dh = disc.dof_handler
 
-    cellvalues = CellScalarValues(disc.quadrature_rule, disc.interpolation)
+    cellvalues = CellValues(disc.quadrature_rule, disc.interpolation, disc.geom_interpolation)
 
-    M = create_sparsity_pattern(dh, ch)
-    G = create_sparsity_pattern(dh, ch)
+    M = allocate_matrix(dh, ch)
+    G = allocate_matrix(dh, ch)
     M_assembler = start_assemble(M)
     G_assembler = start_assemble(G)
     Me = spzeros(ndofs_per_cell(dh), ndofs_per_cell(dh))
@@ -83,6 +86,10 @@ function assemble_burgers_mass_diffusion_matrices(
     end
     apply!(M, spzeros(size(M, 1)), ch)
     apply!(G, spzeros(size(G, 1)), ch)
+    for dof in ch.prescribed_dofs
+        M[dof, dof] = 0.0
+        G[dof, dof] = 0.0
+    end
     if lumping
         M = lump_matrix(M, disc.interpolation)
     end

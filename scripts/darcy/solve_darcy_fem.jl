@@ -3,7 +3,7 @@ using DrWatson
 
 using Distributions,
     DiffEqGMRFs,
-    GMRFs,
+    GaussianMarkovRandomFields,
     Ferrite,
     HDF5,
     SparseArrays,

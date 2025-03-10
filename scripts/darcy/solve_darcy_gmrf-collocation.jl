@@ -3,7 +3,7 @@ using DrWatson
 
 using Distributions,
     DiffEqGMRFs,
-    GMRFs,
+    GaussianMarkovRandomFields,
     Ferrite,
     HDF5,
     SparseArrays,
@@ -89,17 +89,15 @@ function to_mat(dof_vals, E, x_coords, y_coords)
 end
 
 ###### Prior ######
-function form_prior(disc::FEMDiscretization, ν_matern = 2, range = 0.05, σ² = 1.0)
-    κ = √(8ν_matern) / range
-    spde = MaternSPDE{2}(κ, ν_matern, σ²)
-
-    return GMRFs.discretize(spde, disc)
+function form_prior(disc::FEMDiscretization, smoothness = 1, range = 0.05, σ² = 1.0)
+    spde = MaternSPDE{2}(range=range, smoothness=smoothness, σ²=σ²)
+    return GaussianMarkovRandomFields.discretize(spde, disc)
 end
 
-form_prior(disc, 2, 1 / sqrt(N_xy)) # Trigger precompilation
+form_prior(disc, 1, 1 / sqrt(N_xy)) # Trigger precompilation
 @timeit to "Prior construction" x = form_prior(disc, 2, 1 / sqrt(N_xy))
 
-@timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+@timeit to "Etc" cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng))
 
 @timeit to "Set up collocation matrices" begin
     coll_step = (1 / (2 * N_xy))
@@ -155,17 +153,12 @@ condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # Trigger prec
 @timeit to "Conditioning + Node reordering" x_cond =
     condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # For Cholesky permutation
 mat_nnz = nnz(sparse(to_matrix(precision_map(x_cond))))
-if x_cond isa ConstrainedGMRF
-    p = x_cond.inner_gmrf.solver_ref[].precision_chol.p
-    chol_nnz = nnz(x_cond.inner_gmrf.solver_ref[].precision_chol)
-else
-    p = x_cond.solver_ref[].precision_chol.p
-    chol_nnz = nnz(x_cond.solver_ref[].precision_chol)
-end
+p = x_cond.solver_ref[].precision_chol.p
+chol_nnz = nnz(x_cond.solver_ref[].precision_chol)
 
 @info to
 
-cbp2 = CholeskySolverBlueprint(RBMCStrategy(50, rng), p)
+cbp2 = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng), perm=p)
 
 function solve_problem(idx)
     cur_to = TimerOutput()
@@ -178,8 +171,8 @@ function solve_problem(idx)
     )
     @timeit cur_to "Conditioning" x_cond =
         condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp2)
-    pred = to_mat(full_mean(x_cond), E, x_coords, y_coords)
-    @timeit cur_to "Sampling" full_rand(rng, x_cond)
+    pred = to_mat(mean(x_cond), E, x_coords, y_coords)
+    @timeit cur_to "Sampling" rand(rng, x_cond)
     @timeit cur_to "Std dev" cur_std = std(x_cond)
     cur_rel_err = rel_err(pred, example_soln)
     cur_rmse = rmse(pred, example_soln)

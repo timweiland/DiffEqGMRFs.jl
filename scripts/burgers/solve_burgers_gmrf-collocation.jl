@@ -3,7 +3,7 @@ using DrWatson
 
 using Distributions,
     DiffEqGMRFs,
-    GMRFs,
+    GaussianMarkovRandomFields,
     Ferrite,
     HDF5,
     SparseArrays,
@@ -102,38 +102,40 @@ function form_adv_diff_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_
     bulk_speed = mean(ic)
 
     ν_matern = 3 // 2
-    desired_range = sqrt(1 / N_collocation)
+    #desired_range = sqrt(1 / N_collocation)
+    desired_range = 0.02
     κ = √(8ν_matern) / desired_range
 
     c = 1 / (ν_burgers)
     γ = -c * bulk_speed
     spde = AdvectionDiffusionSPDE{1}(
-        0.0,
-        1 // 1,
-        1.0 * ones(1, 1),
-        [γ],
-        c,
-        0.1 * sqrt(c),
-        ν_matern,
-        κ,
+        κ=0.0,
+        α=1 // 1,
+        H=1.0 * ones(1, 1),
+        γ=[γ],
+        c=c,
+        τ=0.1 * sqrt(c),
+        spatial_spde = MaternSPDE{1}(κ=κ, ν=ν_matern),
+        initial_spde = MaternSPDE{1}(κ=κ, ν=ν_matern)
     )
 
-    return GMRFs.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
+    return GaussianMarkovRandomFields.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
 end
 
 function form_product_matern_prior(disc::FEMDiscretization, ts, N_collocation, matern_temporal_lengthscale)
-    ν_matern_spatial = 3 // 2
-    desired_range_spatial = sqrt(1 / N_collocation)
-    κ = √(8ν_matern_spatial) / desired_range_spatial
+    #ν_matern_spatial = 3 // 2
+    #desired_range_spatial = sqrt(1 / N_collocation)
+    #κ = √(8ν_matern_spatial) / desired_range_spatial
 
-    ν_matern_temporal = 1 // 2
+    desired_range_spatial = 0.02
+    #ν_matern_temporal = 1 // 2
     desired_range_temporal = matern_temporal_lengthscale
-    κ_temporal = √(8ν_matern_temporal) / desired_range_temporal
+    #κ_temporal = √(8ν_matern_temporal) / desired_range_temporal
 
-    temporal_matern = MaternSPDE{1}(κ_temporal, ν_matern_temporal, 0.1)
-    spatial_matern = MaternSPDE{1}(κ, ν_matern_spatial, 0.1)
+    temporal_matern = MaternSPDE{1}(range=desired_range_temporal, smoothness=0, σ²=0.1)
+    spatial_matern = MaternSPDE{1}(range=desired_range_spatial, smoothness=3, σ²=0.1)
 
-    return product_matern(temporal_matern, length(ts), spatial_matern, disc; solver_blueprint = CholeskySolverBlueprint(RBMCStrategy(50)))
+    return product_matern(temporal_matern, length(ts), spatial_matern, disc; solver_blueprint = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50)))
 end
 
 function form_prior(disc::FEMDiscretization, ts, ic, N_collocation, ν_burgers, prior_type, matern_temporal_lengthscale)
@@ -149,7 +151,7 @@ end
 x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
 @timeit to "Prior construction" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
 
-@timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+@timeit to "Etc" cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng))
 
 A_ic = evaluation_matrix(disc, [Tensors.Vec(Float64(x)) for x in x_coords])
 A_ic = spatial_to_spatiotemporal(A_ic, 1, length(ts))
@@ -172,10 +174,10 @@ x_ic = condition_on_observations(x, A_ic, 1e8, ys_ic; solver_blueprint = cbp)
     ∂uₜ₊₁∂x = vcat([spatial_to_spatiotemporal(∂u∂x, i, length(ts)) for i = 2:length(ts)]...)
     ∂²uₜ₊₁∂x² = vcat([spatial_to_spatiotemporal(∂²u∂x², i, length(ts)) for i = 2:length(ts)]...)
     y = spzeros(size(Aₜ, 1))
-    Aₜ, y = constrainify_linear_system(Aₜ, y, x_ic)
-    Aₜ₊₁, y = constrainify_linear_system(Aₜ₊₁, y, x_ic)
-    ∂uₜ₊₁∂x, y = constrainify_linear_system(∂uₜ₊₁∂x, y, x_ic)
-    ∂²uₜ₊₁∂x², y = constrainify_linear_system(∂²uₜ₊₁∂x², y, x_ic)
+    #Aₜ, y = constrainify_linear_system(Aₜ, y, x_ic)
+    #Aₜ₊₁, y = constrainify_linear_system(Aₜ₊₁, y, x_ic)
+    #∂uₜ₊₁∂x, y = constrainify_linear_system(∂uₜ₊₁∂x, y, x_ic)
+    #∂²uₜ₊₁∂x², y = constrainify_linear_system(∂²uₜ₊₁∂x², y, x_ic)
 
     ν_burger = ds.ν
     J_static = Aₜ₊₁ - Aₜ - dt * ν_burger * ∂²uₜ₊₁∂x²
@@ -204,7 +206,7 @@ function interpolate_solution(x_prior, solution_mat, ys_ic)
 end
 
 function get_log_det_Σ(x_final)
-    L_diag = diag(sparse(x_final.inner_gmrf.solver_ref[].precision_chol.L))
+    L_diag = diag(sparse(x_final.solver_ref[].precision_chol.L))
     return -2 * sum(log.(L_diag))
 end
 
@@ -221,13 +223,13 @@ function solve_problem(idx)
     @timeit cur_to "Prior" x = form_prior(disc, ts, example_ic, N_collocation, ds.ν, prior_type, matern_temporal_lengthscale)
     @timeit cur_to "Initial condition" x_ic = condition_on_observations(x, A_ic, noise_ic, ys_ic; solver_blueprint = cbp)
 
-    ic_pred = to_mat(full_mean(x_ic), E, ts, x_coords)
+    ic_pred = to_mat(mean(x_ic), E, ts, x_coords)
     ic_pred = ic_pred[2:end, 1:end]
     ic_rel_err = rel_err(ic_pred, example_soln_no_t0)
     ic_rmse = rmse(ic_pred, example_soln_no_t0)
     ic_max_err = max_err(ic_pred, example_soln_no_t0)
 
-    p = x_ic.inner_gmrf.solver_ref[].precision_chol.p
+    p = x_ic.solver_ref[].precision_chol.p
     gncbp = GNCholeskySolverBlueprint(p)
 
 
@@ -246,30 +248,23 @@ function solve_problem(idx)
         J_final = gno.Jₖ
         Q = gno.Q_mat
         new_precision = LinearMap(Q + noise_ic * J_final' * J_final)
-        x_final_inner = ConcreteConstantMeshSTGMRF(
+        x_final = ConcreteConstantMeshSTGMRF(
             gno.xₖ,
             new_precision,
             disc,
-            CholeskySolverBlueprint(RBMCStrategy(50), p),
-        )
-        x_final = ConstrainedGMRF(
-            x_final_inner,
-            x_ic.prescribed_dofs,
-            x_ic.free_dofs,
-            x_ic.free_to_prescribed_mat,
-            x_ic.free_to_prescribed_offset,
+            CholeskySolverBlueprint(var_strategy=RBMCStrategy(50), perm=p),
         )
     end
     mat_nnz = nnz(to_matrix(precision_map(x_final)))
-    chol_nnz = nnz(x_final.inner_gmrf.solver_ref[].precision_chol)
+    chol_nnz = nnz(x_final.solver_ref[].precision_chol)
 
     soln_dofs = interpolate_solution(x, example_soln, ys_ic)
     sqmahal_to_soln = sqmahal(x_final, soln_dofs)
     cur_nll = nll_soln(x_final, sqmahal_to_soln)
     
-    pred = to_mat(full_mean(x_final), E, ts, x_coords)
+    pred = to_mat(mean(x_final), E, ts, x_coords)
     pred = pred[2:end, 1:end]
-    @timeit cur_to "Sampling" full_rand(rng, x_final)
+    @timeit cur_to "Sampling" rand(rng, x_final)
     @timeit cur_to "Std dev" cur_std = std(x_final)
     cur_rel_err = rel_err(pred, example_soln_no_t0)
     cur_rmse = rmse(pred, example_soln_no_t0)

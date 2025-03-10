@@ -1,5 +1,5 @@
 using DiffEqGMRFs,
-    GMRFs, Ferrite, HDF5, Makie, SparseArrays, LinearAlgebra, LinearMaps, Printf
+    GaussianMarkovRandomFields, Ferrite, HDF5, Makie, SparseArrays, LinearAlgebra, LinearMaps, Printf
 
 function plot_example(x_coords, soln_mat)
     fig = Figure()
@@ -84,8 +84,8 @@ ts = range(t_bounds[1], t_bounds[2], Base.size(example_problem, 2))
 
 ###### Prior ######
 x_prior =
-    GMRFs.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
-cbp = CholeskySolverBlueprint(RBMCStrategy(50))
+    GaussianMarkovRandomFields.discretize(spde, disc, ts; mean_offset = bulk_speed, prescribed_noise = 1e-8)
+cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50))
 
 ##### Initial condition ######
 #A_ic = node_selection_matrix(disc, 3:2:length(grid.nodes))
@@ -263,7 +263,7 @@ x_final_inner = ConstantMeshSTGMRF(
     new_precision,
     disc,
     x_ic.inner_gmrf.prior.ssm,
-    CholeskySolverBlueprint(RBMCStrategy(100)),
+    CholeskySolverBlueprint(var_strategy=RBMCStrategy(100)),
 )
 x_final = ConstrainedGMRF(
     x_final_inner,

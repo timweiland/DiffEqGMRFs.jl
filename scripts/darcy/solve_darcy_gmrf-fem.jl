@@ -3,7 +3,7 @@ using DrWatson
 
 using Distributions,
     DiffEqGMRFs,
-    GMRFs,
+    GaussianMarkovRandomFields,
     Ferrite,
     HDF5,
     SparseArrays,
@@ -89,21 +89,19 @@ function to_mat(dof_vals, E, x_coords, y_coords)
 end
 
 ###### Prior ######
-function form_prior(disc::FEMDiscretization, ν_matern = 2, range = 0.05, σ² = 1.0)
-    κ = √(8ν_matern) / range
-    spde = MaternSPDE{2}(κ, ν_matern, σ²)
-
-    return GMRFs.discretize(spde, disc)
+function form_prior(disc::FEMDiscretization, smoothness=1, range = 0.05, σ² = 1.0)
+    spde = MaternSPDE{2}(range=range, smoothness=smoothness, σ²=σ²)
+    return GaussianMarkovRandomFields.discretize(spde, disc)
 end
 
 form_prior(disc, 2, 1 / sqrt(N_xy)) # Trigger precompilation
 @timeit to "Prior construction" x = form_prior(disc, 2, 1 / sqrt(N_xy))
 
-@timeit to "Etc" cbp = CholeskySolverBlueprint(RBMCStrategy(50, rng))
+@timeit to "Etc" cbp = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng))
 
 if inflated_boundary
     ch = ConstraintHandler(disc.dof_handler)
-    ∂Ω = disc.grid.facesets["Interior boundary"]
+    ∂Ω = disc.grid.facetsets["Interior boundary"]
     bc_u = Ferrite.Dirichlet(:u, ∂Ω, (x, t) -> 0.0)
     add!(ch, bc_u)
     close!(ch)
@@ -168,17 +166,12 @@ condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # Trigger prec
 @timeit to "Conditioning + Node reordering" x_cond =
     condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp) # For Cholesky permutation
 mat_nnz = nnz(sparse(to_matrix(precision_map(x_cond))))
-if x_cond isa ConstrainedGMRF
-    p = x_cond.inner_gmrf.solver_ref[].precision_chol.p
-    chol_nnz = nnz(x_cond.inner_gmrf.solver_ref[].precision_chol)
-else
-    p = x_cond.solver_ref[].precision_chol.p
-    chol_nnz = nnz(x_cond.solver_ref[].precision_chol)
-end
+p = x_cond.solver_ref[].precision_chol.p
+chol_nnz = nnz(x_cond.solver_ref[].precision_chol)
 
 @info to
 
-cbp2 = CholeskySolverBlueprint(RBMCStrategy(50, rng), p)
+cbp2 = CholeskySolverBlueprint(var_strategy=RBMCStrategy(50; rng=rng), perm=p)
 
 function solve_problem(idx)
     cur_to = TimerOutput()
@@ -194,8 +187,8 @@ function solve_problem(idx)
     )
     @timeit cur_to "Conditioning" x_cond =
         condition_on_observations(x, A, Q_ϵ, ys; solver_blueprint = cbp2)
-    pred = to_mat(full_mean(x_cond), E, x_coords, y_coords)
-    @timeit cur_to "Sampling" full_rand(rng, x_cond)
+    pred = to_mat(mean(x_cond), E, x_coords, y_coords)
+    @timeit cur_to "Sampling" rand(rng, x_cond)
     @timeit cur_to "Std dev" cur_std = std(x_cond)
     cur_rel_err = rel_err(pred, example_soln)
     cur_rmse = rmse(pred, example_soln)
@@ -216,6 +209,7 @@ pde_disc_times = Int64[]
 N_samples = dry_run ? 3 : Base.size(ds.darcy_vars["sol"], 1)
 for i = 1:N_samples
     cur_rel_err, cur_rmse, cur_max_err, std_norm, cur_to = solve_problem(i)
+    println(cur_rel_err)
     push!(rel_errs, cur_rel_err)
     push!(rmses, cur_rmse)
     push!(max_errs, cur_max_err)

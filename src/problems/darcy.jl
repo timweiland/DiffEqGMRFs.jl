@@ -1,4 +1,4 @@
-using Ferrite, GMRFs, LinearAlgebra, SparseArrays
+using Ferrite, GaussianMarkovRandomFields, LinearAlgebra, SparseArrays
 
 export assemble_darcy_diff_matrix
 
@@ -13,11 +13,11 @@ function assemble_darcy_diff_matrix(
 )
     dh = disc.dof_handler    
 
-    cellvalues = CellScalarValues(disc.quadrature_rule, disc.interpolation)
+    cellvalues = CellValues(disc.quadrature_rule, disc.interpolation, disc.geom_interpolation)
     n_basefuncs = getnbasefunctions(cellvalues)
     # Reset to 0
 
-    G = create_sparsity_pattern(dh)
+    G = allocate_matrix(dh, ch)
     f = zeros(ndofs(dh))
     assembler = start_assemble(G, f)
     Ge = zeros(ndofs_per_cell(dh), ndofs_per_cell(dh))

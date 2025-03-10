@@ -1,4 +1,4 @@
-using GMRFs, Ferrite, SparseArrays, LinearAlgebra, LinearMaps, SpecialFunctions
+using GaussianMarkovRandomFields, Ferrite, SparseArrays, LinearAlgebra, LinearMaps, SpecialFunctions
 
 export LinearShallowWaterSPDE, discretize
 
@@ -14,7 +14,7 @@ struct LinearShallowWaterSPDE <: SPDE
     end
 end
 
-function assemble_system!(K, M, S, dh, ip, cvh, cvu, cvv, H, k, f, g)
+function assemble_system!(K, M, S, dh, ch, ip, cvh, cvu, cvv, H, k, f, g)
     K_assembler = start_assemble(K)
     M_assembler = start_assemble(M)
     S_assembler = start_assemble(S)
@@ -116,6 +116,9 @@ function assemble_system!(K, M, S, dh, ip, cvh, cvu, cvv, H, k, f, g)
         assemble!(M_assembler, global_dofs, me)
         assemble!(S_assembler, global_dofs, se)
     end
+    apply!(K, zeros(size(K, 1)), ch)
+    apply!(M, zeros(size(M, 1)), ch)
+    apply!(S, zeros(size(S, 1)), ch)
 end
 
 function discretize(
@@ -123,6 +126,8 @@ function discretize(
     spatial_disc::FEMDiscretization{2},
     ts;
     κ_matern = 1.0,
+    mean_offset = 0.0,
+    solver_blueprint=CGSolverBlueprint(),
 )
     if Set(spatial_disc.dof_handler.field_names) != Set([:h, :u, :v])
         throw(ArgumentError("Expected fields: h, u, v"))
@@ -151,6 +156,7 @@ function discretize(
         M,
         G,
         spatial_disc.dof_handler,
+        spatial_disc.constraint_handler,
         spatial_disc.interpolation,
         cvh,
         cvu,
@@ -163,26 +169,46 @@ function discretize(
 
     M̃ = M
     f = spzeros(size(K, 1))
-    apply!(M̃, f, spatial_disc.constraint_handler)
+    for dof in spatial_disc.constraint_handler.prescribed_dofs
+        G[dof, dof] = 1.0
+        M̃[dof, dof] = 1e-2 # TODO
+    end
+
     M̃⁻¹ = spdiagm(0 => 1 ./ diag(M̃))
 
     K_matern = (κ_matern^2 * M̃ + G)
-    apply!(K_matern, f, spatial_disc.constraint_handler)
+    # apply!(K_matern, f, spatial_disc.constraint_handler)
 
     ν = 2
     σ²_natural = gamma(ν) / (gamma(ν + 1) * (4π) * κ_matern^(2 * ν))
     σ²_goal = 1.0
     ratio = σ²_natural / σ²_goal
 
-    Q_matern = ratio * K_matern * M̃⁻¹ * K_matern * M̃⁻¹ * K_matern
-    for idx in spatial_disc.constraint_handler.prescribed_dofs
-        Q_matern[idx, idx] = 1e8 # very certain :D
+    # Q_matern = ratio * K_matern * M̃⁻¹ * K_matern * M̃⁻¹ * K_matern
+    Q_matern = ratio * K_matern' * M̃⁻¹ * K_matern
+    M̃⁻¹_sqrt = spdiagm(0 => sqrt.(1 ./ diag(M̃)))
+    Q_matern_sqrt = sqrt(ratio) * K_matern' * M̃⁻¹_sqrt
+    # for idx in spatial_disc.constraint_handler.prescribed_dofs
+    #     Q_matern[idx, idx] = 1e10 # very certain :D
+    # end
+    Q₀ = LinearMapWithSqrt(LinearMap(Symmetric(Q_matern)), LinearMap(Q_matern_sqrt))
+
+    x₀ = GMRF(spzeros(size(Q_matern, 1)), Q₀)
+
+    noise_mat = spdiagm(0 => fill(𝒟.τ, Base.size(M, 2)))
+
+    Nₛ = Base.size(K, 2)
+    total_ndofs = Nₛ * length(ts)
+    mean_offset = fill(mean_offset, total_ndofs)
+    for dof in spatial_disc.constraint_handler.prescribed_dofs
+        noise_mat[dof, dof] = 1e-2
+        st_dofs = dof:Nₛ:total_ndofs
+        mean_offset[st_dofs] .= 0.0
     end
+    inv_noise_mat = spdiagm(0 => 1 ./ diag(noise_mat))
 
-    x₀ = GMRF(spzeros(size(Q_matern, 1)), Symmetric(Q_matern))
-
-    β = dt -> sqrt(dt) * 𝒟.τ
-    β⁻¹ = dt -> 1.0 / β(dt)
+    β = dt -> sqrt(dt) * noise_mat
+    β⁻¹ = dt -> (1 / sqrt(dt)) * inv_noise_mat
     G_fn =
         dt -> (
             S_tmp = M̃ + dt * K; apply!(S_tmp, f, spatial_disc.constraint_handler); LinearMap(
@@ -202,5 +228,15 @@ function discretize(
     )
 
     X = joint_ssm(ssm)
-    return ConstantMeshSTGMRF(X.mean, X.precision, spatial_disc, ssm, CGSolverBlueprint())
+    X = ImplicitEulerConstantMeshSTGMRF(
+        X.mean .+ mean_offset,
+        X.precision,
+        spatial_disc,
+        ssm,
+        solver_blueprint,
+    )
+    if length(spatial_disc.constraint_handler.prescribed_dofs) > 0
+        return ConstrainedGMRF(X, spatial_disc.constraint_handler)
+    end
+    return X
 end
