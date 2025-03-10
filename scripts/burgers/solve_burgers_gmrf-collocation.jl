@@ -63,7 +63,7 @@ function parse_cmd()
         "--N_samples"
         help = "Number of example problems to solve"
         arg_type = Int
-        default = 100
+        default = 30
     end
     return parse_args(s)
 end
